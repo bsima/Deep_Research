@@ -28,9 +28,11 @@ def get_today_str() -> str:
 
 # ===== CONFIGURATION =====
 
+from deep_research.config import get_model_string, get_model_kwargs
+
 # Initialize model
-model = init_chat_model(model="openai:gpt-5")
-creative_model = init_chat_model(model="openai:gpt-5")
+model = init_chat_model(model=get_model_string(), **get_model_kwargs())
+creative_model = init_chat_model(model=get_model_string(), **get_model_kwargs())
 
 # ===== WORKFLOW NODES =====
 

@@ -33,6 +33,7 @@ from deep_research.state_multi_agent_supervisor import (
     ResearchComplete
 )
 from deep_research.utils import get_today_str, think_tool, refine_draft_report
+from deep_research.config import get_model_string, get_model_kwargs
 
 def get_notes_from_tool_calls(messages: list[BaseMessage]) -> list[str]:
     """Extract research notes from ToolMessage objects in supervisor message history.
@@ -67,18 +68,20 @@ except ImportError:
 
 # ===== CONFIGURATION =====
 
+import os
+
 supervisor_tools = [ConductResearch, ResearchComplete, think_tool,refine_draft_report]
-supervisor_model = init_chat_model(model="openai:gpt-5")
+supervisor_model = init_chat_model(model=get_model_string(), **get_model_kwargs())
 supervisor_model_with_tools = supervisor_model.bind_tools(supervisor_tools)
 
-# System constants
+# System constants - configurable via environment variables for speed tuning
 # Maximum number of tool call iterations for individual researcher agents
 # This prevents infinite loops and controls research depth per topic
-max_researcher_iterations = 15 # Calls to think_tool + ConductResearch + refine_draft_report
+max_researcher_iterations = int(os.environ.get("MAX_RESEARCHER_ITERATIONS", "15"))
 
 # Maximum number of concurrent research agents the supervisor can launch
 # This is passed to the lead_researcher_prompt to limit parallel research tasks
-max_concurrent_researchers = 3
+max_concurrent_researchers = int(os.environ.get("MAX_CONCURRENT_RESEARCHERS", "3"))
 
 # ===== SUPERVISOR NODES =====
 

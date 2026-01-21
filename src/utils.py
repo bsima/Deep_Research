@@ -6,6 +6,8 @@ This module provides search and content processing utilities for the research ag
 including web search capabilities and content summarization tools.
 """
 
+import asyncio
+import os
 from pathlib import Path
 from datetime import datetime
 from typing_extensions import Annotated, List, Literal
@@ -17,6 +19,10 @@ from tavily import TavilyClient
 
 from deep_research.state_research import Summary
 from deep_research.prompts import summarize_webpage_prompt, report_generation_with_draft_insight_prompt
+from deep_research.config import get_model_string, get_model_kwargs
+
+# Skip LLM summarization for max speed (use Tavily's built-in summaries)
+SKIP_LLM_SUMMARIZATION = os.environ.get("SKIP_LLM_SUMMARIZATION", "").lower() in ("1", "true", "yes")
 
 # ===== UTILITY FUNCTIONS =====
 
@@ -39,8 +45,9 @@ def get_current_dir() -> Path:
 
 # ===== CONFIGURATION =====
 
-summarization_model = init_chat_model(model="openai:gpt-5")
-writer_model = init_chat_model(model="openai:gpt-5", max_tokens=32000)
+# Use faster model for summarization (called many times per search)
+summarization_model = init_chat_model(model=get_model_string(fast=True), **get_model_kwargs())
+writer_model = init_chat_model(model=get_model_string(), **get_model_kwargs(max_tokens=32000))
 tavily_client = TavilyClient()
 MAX_CONTEXT_LENGTH = 250000
 
@@ -110,6 +117,38 @@ def summarize_webpage_content(webpage_content: str) -> str:
         print(f"Failed to summarize webpage: {str(e)}")
         return webpage_content[:1000] + "..." if len(webpage_content) > 1000 else webpage_content
 
+
+async def summarize_webpage_content_async(webpage_content: str) -> str:
+    """Async version of summarize_webpage_content for parallel processing.
+
+    Args:
+        webpage_content: Raw webpage content to summarize
+
+    Returns:
+        Formatted summary with key excerpts
+    """
+    try:
+        structured_model = summarization_model.with_structured_output(Summary)
+        
+        # Use async invoke
+        summary = await structured_model.ainvoke([
+            HumanMessage(content=summarize_webpage_prompt.format(
+                webpage_content=webpage_content, 
+                date=get_today_str()
+            ))
+        ])
+
+        formatted_summary = (
+            f"<summary>\n{summary.summary}\n</summary>\n\n"
+            f"<key_excerpts>\n{summary.key_excerpts}\n</key_excerpts>"
+        )
+
+        return formatted_summary
+
+    except Exception as e:
+        print(f"Failed to summarize webpage: {str(e)}")
+        return webpage_content[:1000] + "..." if len(webpage_content) > 1000 else webpage_content
+
 def deduplicate_search_results(search_results: List[dict]) -> dict:
     """Deduplicate search results by URL to avoid processing duplicate content.
 
@@ -131,6 +170,8 @@ def deduplicate_search_results(search_results: List[dict]) -> dict:
 
 def process_search_results(unique_results: dict) -> dict:
     """Process search results by summarizing content where available.
+    
+    Uses parallel async processing for speed when possible.
 
     Args:
         unique_results: Dictionary of unique search results
@@ -138,14 +179,26 @@ def process_search_results(unique_results: dict) -> dict:
     Returns:
         Dictionary of processed results with summaries
     """
+    # Use async parallel processing if we're in an async context
+    try:
+        loop = asyncio.get_running_loop()
+        # We're in an async context, but this is a sync function
+        # Fall back to sync processing or use run_coroutine_threadsafe
+        return _process_search_results_sync(unique_results)
+    except RuntimeError:
+        # No running loop, we can create one for parallel processing
+        return asyncio.run(_process_search_results_async(unique_results))
+
+
+def _process_search_results_sync(unique_results: dict) -> dict:
+    """Synchronous fallback for processing search results."""
     summarized_results = {}
 
     for url, result in unique_results.items():
-        # Use existing content if no raw content for summarization
-        if not result.get("raw_content"):
+        if not result.get("raw_content") or SKIP_LLM_SUMMARIZATION:
+            # Use Tavily's built-in summary (much faster)
             content = result['content']
         else:
-            # Summarize raw content for better processing
             content = summarize_webpage_content(result['raw_content'][:MAX_CONTEXT_LENGTH])
 
         summarized_results[url] = {
@@ -154,6 +207,52 @@ def process_search_results(unique_results: dict) -> dict:
         }
 
     return summarized_results
+
+
+async def _process_search_results_async(unique_results: dict) -> dict:
+    """Async parallel processing of search results for speed."""
+    
+    if SKIP_LLM_SUMMARIZATION:
+        # Fast path: no LLM calls needed
+        return {
+            url: {'title': result['title'], 'content': result['content']}
+            for url, result in unique_results.items()
+        }
+    
+    # Prepare async tasks for results that need summarization
+    tasks = []
+    urls_needing_summary = []
+    quick_results = {}
+    
+    for url, result in unique_results.items():
+        if not result.get("raw_content"):
+            quick_results[url] = {
+                'title': result['title'],
+                'content': result['content']
+            }
+        else:
+            urls_needing_summary.append(url)
+            tasks.append(
+                summarize_webpage_content_async(result['raw_content'][:MAX_CONTEXT_LENGTH])
+            )
+    
+    # Run all summarization tasks in parallel
+    if tasks:
+        summaries = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for url, summary in zip(urls_needing_summary, summaries):
+            if isinstance(summary, Exception):
+                # Fallback to raw content on error
+                content = unique_results[url]['content']
+            else:
+                content = summary
+            
+            quick_results[url] = {
+                'title': unique_results[url]['title'],
+                'content': content
+            }
+    
+    return quick_results
 
 def format_search_output(summarized_results: dict) -> str:
     """Format search results into a well-structured string output.
@@ -182,7 +281,7 @@ def format_search_output(summarized_results: dict) -> str:
 @tool(parse_docstring=True)
 def tavily_search(
     query: str,
-    max_results: Annotated[int, InjectedToolArg] = 3,
+    max_results: Annotated[int, InjectedToolArg] = 2,  # Reduced from 3 for faster results
     topic: Annotated[Literal["general", "news", "finance"], InjectedToolArg] = "general",
 ) -> str:
     """Fetch results from Tavily search API with content summarization.

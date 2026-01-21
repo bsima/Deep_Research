@@ -24,7 +24,8 @@ from deep_research.multi_agent_supervisor import supervisor_agent
 # ===== Config =====
 
 from langchain.chat_models import init_chat_model
-writer_model = init_chat_model(model="openai:gpt-5", max_tokens=40000) # model="anthropic:claude-sonnet-4-20250514", max_tokens=64000
+from deep_research.config import get_model_string, get_model_kwargs
+writer_model = init_chat_model(model=get_model_string(), **get_model_kwargs(max_tokens=40000))
 
 # ===== FINAL REPORT GENERATION =====
 
